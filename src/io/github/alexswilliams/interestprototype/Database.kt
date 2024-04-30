@@ -37,7 +37,6 @@ object Database {
         DepositSchemeVersion(3, 1, LocalDate.parse("2024-04-20"), BigDecimal("0.001")),
     )
 
-    fun findSchemeVersion(id: Int) = depositSchemeVersionTable.first { it.id == id }
     fun findSchemeVersionForDate(schemeId: Int, on: LocalDate) =
         depositSchemeVersionTable.filter { it.id == schemeId }.lastOrNull { it.from <= on }
 
@@ -55,7 +54,6 @@ object Database {
 
 
     private val periodTable: MutableList<PeriodRow> = mutableListOf()
-    fun findPeriod(id: Int) = periodTable.first { it.id == id }
     fun openPeriod(accountId: Int, schemeVersionId: Int, start: LocalDate, end: LocalDate) =
         periodTable.add(PeriodRow(1 + (periodTable.maxOfOrNull { it.id } ?: 0), schemeVersionId, accountId, start, end))
 

@@ -32,7 +32,7 @@ private fun main() {
         val balanceHistory: List<DailyBalance>,
     )
 
-    val scenarios = SCENARIOS_INPUT.replace(Regex("((//.*$)|_|\\[|])*", RegexOption.MULTILINE), "")
+    val scenarios = SCENARIOS_INPUT.replace(Regex("(//.*$)|_|\\[|]", RegexOption.MULTILINE), "")
         .lines().filter { it.isNotBlank() }.drop(1)
         .map { line -> line.split(',').map { it.trim() } }
         .map { line ->
