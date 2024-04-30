@@ -4,10 +4,10 @@ import java.math.BigDecimal
 import java.time.LocalDate
 
 object Database {
-/*
-    data class ProductRow(val id: Int, val defaultDepositSchemeId: Int, val name: String)
-    data class DepositSchemeRow(val id: Int)
-*/
+    /*
+        data class ProductRow(val id: Int, val defaultDepositSchemeId: Int, val name: String)
+        data class DepositSchemeRow(val id: Int)
+    */
     data class DepositSchemeVersion(val id: Int, val schemeId: Int, val from: LocalDate, val aer: BigDecimal)
     data class AccountRow(val id: Int, val createdOn: LocalDate, val productId: Int)
     data class AccountClosureRow(val id: Int, val accountId: Int, val closedOn: LocalDate)
@@ -15,7 +15,6 @@ object Database {
     data class EodBalanceRow(val id: Int, val accountId: Int, val runStart: LocalDate, var runEnd: LocalDate, val balance: BigDecimal)
     enum class EodActionTaken { NEW_BALANCE_RUN_CREATED, EXISTING_BALANCE_RUN_EXTENDED }
     data class EodBalanceCompletionQueueRow(val eodBalanceId: Int, val accountId: Int, val date: LocalDate, val actionTaken: EodActionTaken)
-    data class DailyAccrualCompletionQueueRow(val accountId: Int, val accrualRunId: Int, val on: LocalDate, val delta: BigDecimal)
     data class AccrualRow(
         val id: Int,
         val accountId: Int,
@@ -28,16 +27,10 @@ object Database {
         var endAccrualBalance: Double,
     )
 
-    /*
-        private val productTable: MutableList<ProductRow> = mutableListOf(
-            ProductRow(1, 1, "FTD 1"),
-            ProductRow(2, 2, "FTD 2"),
-        )
-        private val depositSchemeTable: MutableList<DepositSchemeRow> = mutableListOf(
-            DepositSchemeRow(1),
-            DepositSchemeRow(2),
-        )
-    */
+    data class DailyAccrualCompletionQueueRow(val accountId: Int, val accrualRunId: Int, val on: LocalDate, val delta: BigDecimal)
+    data class AccrualLedgerRow(val id: Int, val productId: Int, val valueDate: LocalDate, val amount: BigDecimal)
+    data class PaymentRow(val id: Int, val accountId: Int, val periodId: Int, val amount: BigDecimal, val on: LocalDate)
+
     private val depositSchemeVersionTable: MutableList<DepositSchemeVersion> = mutableListOf(
         DepositSchemeVersion(1, 1, LocalDate.parse("2020-01-01"), BigDecimal("0.035")),
         DepositSchemeVersion(2, 2, LocalDate.parse("2020-01-01"), BigDecimal("0.05")),
@@ -51,7 +44,7 @@ object Database {
 
     private val accountTable: MutableList<AccountRow> = mutableListOf()
     fun createAccount(id: Int, on: LocalDate, productId: Int) = accountTable.add(AccountRow(id, on, productId))
-    private fun findAccount(id: Int) = accountTable.first { it.id == id }
+    fun findAccount(id: Int) = accountTable.first { it.id == id }
 
 
     private val accountClosureTable: MutableList<AccountClosureRow> = mutableListOf()
@@ -134,25 +127,34 @@ object Database {
         }
 
     private val dailyAccrualCompletionQueueRow: MutableList<DailyAccrualCompletionQueueRow> = mutableListOf()
-    fun enqueueDailyAccrual(accountId: Int, accrualRunId: Int, forDate: LocalDate, accruedToday: BigDecimal) {
-        dailyAccrualCompletionQueueRow.add(
-            DailyAccrualCompletionQueueRow(
-                accountId,
-                accrualRunId,
-                forDate,
-                accruedToday
-            )
-        )
-    }
+    fun enqueueDailyAccrual(accountId: Int, accrualRunId: Int, forDate: LocalDate, accruedToday: BigDecimal) =
+        dailyAccrualCompletionQueueRow.add(DailyAccrualCompletionQueueRow(accountId, accrualRunId, forDate, accruedToday))
+
+    fun findEarliestAccrualResult() = dailyAccrualCompletionQueueRow.minOfOrNull { it.on }
+    fun findAccrualResultsForDay(on: LocalDate) = dailyAccrualCompletionQueueRow.filter { it.on == on }
+    fun removeAccrualResult(accrualRunId: Int, on: LocalDate) =
+        dailyAccrualCompletionQueueRow.removeAll { it.accrualRunId == accrualRunId && it.on == on }
+
+    private val accrualLedgerTable: MutableList<AccrualLedgerRow> = mutableListOf()
+    fun postEntry(productId: Int, amount: BigDecimal, on: LocalDate) =
+        accrualLedgerTable.add(AccrualLedgerRow((1 + (accrualLedgerTable.maxOfOrNull { it.id } ?: 0)), productId, on, amount))
+
+    private val paymentTable: MutableList<PaymentRow> = mutableListOf()
+    fun createPayment(accountId: Int, periodId: Int, amount: BigDecimal, on: LocalDate) =
+        paymentTable.add(PaymentRow(1 + (paymentTable.maxOfOrNull { it.id } ?: 0), accountId, periodId, amount, on))
 
     fun printState(day: LocalDate, accountFilter: (Int) -> Boolean = { _ -> true }) {
         println(day)
-        print("Accounts: "); println(accountTable.filter { accountFilter(it.id) })
-        print("Account Closures: "); println(accountClosureTable.filter { accountFilter(it.accountId) })
-        print("EoD Balances: "); println(eodBalanceTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
-        print("EoD Actions: "); println(eodBalanceCompletionQueue.filter { accountFilter(it.accountId) }.joinToString("\n"))
-        print("Accruals: "); println(accrualTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
-        print("Accrual Actions: "); println(dailyAccrualCompletionQueueRow.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Scheme Versions:\n"); println(depositSchemeVersionTable)
+        print("Accounts:\n"); println(accountTable.filter { accountFilter(it.id) })
+        print("Account Closures:\n"); println(accountClosureTable.filter { accountFilter(it.accountId) })
+        print("EoD Balances:\n"); println(eodBalanceTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("EoD Actions:\n"); println(eodBalanceCompletionQueue.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Periods:\n"); println(periodTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Accruals:\n"); println(accrualTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Payments:\n"); println(paymentTable.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Accrual Actions:\n"); println(dailyAccrualCompletionQueueRow.filter { accountFilter(it.accountId) }.joinToString("\n"))
+        print("Ledger Entries:\n"); println(accrualLedgerTable.joinToString("\n"))
         println()
     }
 }

@@ -9,8 +9,7 @@ import kotlin.math.pow
 
 object ScenarioRunner {
     fun runScenario(firstDay: LocalDate, lastDay: LocalDate, actions: Map<LocalDate, List<DailyAction>>) {
-        val dates = firstDay.datesUntil(lastDay).toList().toList()
-        dates.forEach { today ->
+        for (today in firstDay.datesUntil(lastDay.plusDays(1))) {
             runNightlyActionsThatProcessYesterday(today.minusDays(1), actions[today.minusDays(1)].orEmpty())
             runDailyActionsThatProcessToday(today, actions[today].orEmpty())
             Database.printState(today) { it == 6 }
@@ -37,19 +36,14 @@ object ScenarioRunner {
     }
 
     private fun runNightlyActionsThatProcessYesterday(yesterday: LocalDate, actions: List<DailyAction>) {
-        for (action in actions) {
-            when (action) {
-                is DailyAction.CreateAccount -> {}
-                is DailyAction.CloseAccount -> {}
-                is DailyAction.CreatePeriod -> {}
-                is DailyAction.ConsumeEoDBalanceFile -> readEodBalanceFile(yesterday, action.balances)
-            }
-        }
-        processEodResults(yesterday)
+        actions.filterIsInstance<DailyAction.ConsumeEoDBalanceFile>().firstOrNull()
+            ?.let { action -> readEodBalanceFile(yesterday, action.balances) }
+
+        processEodBalanceResults(yesterday)
+        processAccrualResults(yesterday)
     }
 
     private fun readEodBalanceFile(forDate: LocalDate, balances: Map<Int, BigDecimal>) {
-        println(balances)
         for ((accountId, balance) in balances) {
             if (Database.isClosed(accountId)) throw Error("Tried to submit EoD Balance for closed account: $forDate, $accountId")
             val currentBalanceRow = Database.findLatestEodBalanceForAccount(accountId)
@@ -68,21 +62,27 @@ object ScenarioRunner {
         }
     }
 
-    private fun processEodResults(currentDay: LocalDate) {
-        val previousDay = currentDay.minusDays(1)
+    private fun processEodBalanceResults(yesterday: LocalDate) {
+        fun compound(aer: BigDecimal, start: LocalDate, end: LocalDate, startingBalance: Double): Double {
+            val daysIntoRun: Long = start.until(end, ChronoUnit.DAYS) + 1
+            return if (daysIntoRun == 365L) (1 + aer.toDouble()) * startingBalance // maybe this could avoid the nasty rounding problem?
+            else startingBalance * (1 + aer.toDouble()).pow(daysIntoRun.toDouble() / 365)
+        }
+
+        val dayBefore = yesterday.minusDays(1)
         val completions = Database.getAllEodBalanceCompletions()
 
         for (event in completions) {
             val currentAccountBalance = Database.getEodBalance(event.eodBalanceId)
-            val currentPeriod = Database.findPeriodForAccountOnDate(event.accountId, currentDay)
+            val currentPeriod = Database.findPeriodForAccountOnDate(event.accountId, yesterday)
                 ?: throw Error("Account not in period")
-            val currentSchemeVersion = Database.findSchemeVersionForDate(currentPeriod.schemeId, currentDay)
-                ?: throw Error("Scheme has no version on date $currentDay")
+            val currentSchemeVersion = Database.findSchemeVersionForDate(currentPeriod.schemeId, yesterday)
+                ?: throw Error("Scheme has no version on date $yesterday")
 
-            val previousAccountBalance = Database.findEodBalanceForDate(event.accountId, previousDay)
-            val previousPeriod = Database.findPeriodForAccountOnDate(event.accountId, previousDay)
-            val previousSchemeVersion = previousPeriod?.let { Database.findSchemeVersionForDate(it.schemeId, previousDay) }
-            val previousAccrualRun = Database.findAccrualForDate(event.accountId, previousDay)
+            val previousAccountBalance = Database.findEodBalanceForDate(event.accountId, dayBefore)
+            val previousPeriod = Database.findPeriodForAccountOnDate(event.accountId, dayBefore)
+            val previousSchemeVersion = previousPeriod?.let { Database.findSchemeVersionForDate(it.schemeId, dayBefore) }
+            val previousAccrualRun = Database.findAccrualForDate(event.accountId, dayBefore)
 
             val newAccrualRunNeeded =
                 previousAccountBalance == null
@@ -95,55 +95,74 @@ object ScenarioRunner {
 
             val (previousAccrualBalance, currentAccrualBalance, nextAccrualRunId) =
                 if (newAccrualRunNeeded) {
-                    val previousAccrualBalance = previousAccrualRun?.endAccrualBalance ?: 0.0
+                    val previousEndAccrual = previousAccrualRun?.endAccrualBalance ?: 0.0
+                    val startingAccrualBalance =
+                        if (previousPeriod?.periodEnd == dayBefore) previousEndAccrual.roundDown2dp().toDouble() - previousEndAccrual
+                        else previousEndAccrual
                     val currentAccrualBalance = compound(
                         aer = currentSchemeVersion.aer,
-                        start = currentDay,
-                        end = currentDay,
-                        startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualBalance
+                        start = yesterday,
+                        end = yesterday,
+                        startingBalance = currentAccountBalance.balance.toDouble() + startingAccrualBalance
                     ) - currentAccountBalance.balance.toDouble()
                     val accrualRunId = Database.createNewAccrualRun(
                         accountId = event.accountId,
                         periodId = currentPeriod.id,
                         schemeVersionId = currentSchemeVersion.id,
                         eodBalanceId = currentAccountBalance.id,
-                        on = currentDay,
-                        startingBalance = previousAccrualBalance,
+                        on = yesterday,
+                        startingBalance = startingAccrualBalance,
                         closingBalance = currentAccrualBalance
                     )
-                    Triple(previousAccrualBalance, currentAccrualBalance, accrualRunId)
+                    Triple(startingAccrualBalance, currentAccrualBalance, accrualRunId)
                 } else {
-                    if (previousAccrualRun == null) throw Error("Expecting previous accrual run to exist for account ${event.accountId} on $currentDay")
-                    if (previousAccrualRun.end != previousDay) throw Error("Expected existing accrual run to end the day before the date currently being processed")
+                    if (previousAccrualRun == null) throw Error("Expecting previous accrual run to exist for account ${event.accountId} on $yesterday")
+                    if (previousAccrualRun.end != dayBefore) throw Error("Expected existing accrual run to end the day before the date currently being processed")
                     val previousAccrualBalance = compound(
                         aer = currentSchemeVersion.aer,
                         start = previousAccrualRun.start,
-                        end = previousDay,
+                        end = dayBefore,
                         startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
                     ) - currentAccountBalance.balance.toDouble()
                     val currentAccrualBalance = compound(
                         aer = currentSchemeVersion.aer,
                         start = previousAccrualRun.start,
-                        end = currentDay,
+                        end = yesterday,
                         startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
                     ) - currentAccountBalance.balance.toDouble()
-                    Database.extendExistingAccrualRun(previousAccrualRun.id, currentDay, currentAccrualBalance)
+                    Database.extendExistingAccrualRun(previousAccrualRun.id, yesterday, currentAccrualBalance)
                     Triple(previousAccrualBalance, currentAccrualBalance, previousAccrualRun.id)
                 }
 
             val accruedToday = currentAccrualBalance - previousAccrualBalance
-            Database.enqueueDailyAccrual(event.accountId, nextAccrualRunId, currentDay, accruedToday.roundDown2dp())
+            Database.enqueueDailyAccrual(event.accountId, nextAccrualRunId, yesterday, accruedToday.roundDown2dp())
 
-            Database.completeEodBalanceCompletionEvent(event.accountId, currentDay)
+            if (currentPeriod.periodEnd == yesterday) {
+                generatePayment(currentPeriod, currentAccrualBalance, yesterday.plusDays(1))
+            }
+
+            Database.completeEodBalanceCompletionEvent(event.accountId, yesterday)
+        }
+    }
+
+    private fun generatePayment(period: Database.PeriodRow, currentAccrualBalance: Double, paymentDate: LocalDate) {
+        // TODO: presumably also some ledger stuff
+        Database.createPayment(period.accountId, period.id, currentAccrualBalance.roundDown2dp(), paymentDate)
+    }
+
+    private fun processAccrualResults(yesterday: LocalDate) {
+        val startDate = Database.findEarliestAccrualResult() ?: return
+        for (date in startDate.datesUntil(yesterday.plusDays(1))) {
+            val resultsForDay = Database.findAccrualResultsForDay(date)
+
+            // Would probably happen in the db?
+            resultsForDay.groupBy { Database.findAccount(it.accountId).productId }
+                .mapValues { (_, accrualsForProduct) -> accrualsForProduct.sumOf { it.delta } }
+                .forEach { (productId, total) -> Database.postEntry(productId, total, yesterday) }
+
+            resultsForDay.forEach { Database.removeAccrualResult(it.accrualRunId, it.on) }
         }
     }
 
     private fun Double.roundDown2dp() = BigDecimal(this, MathContext.UNLIMITED).setScale(2, RoundingMode.DOWN)
-
-    private fun compound(aer: BigDecimal, start: LocalDate, end: LocalDate, startingBalance: Double): Double {
-        val daysIntoRun: Long = start.until(end, ChronoUnit.DAYS) + 1
-        // TODO: leap years, also this isn't a real calculation, just something to give vague numbers for the poc
-        return if (daysIntoRun == 365L) (1 + aer.toDouble()) * startingBalance
-        else startingBalance * (1 + aer.toDouble()).pow(daysIntoRun.toDouble() / 365)
-    }
 }
