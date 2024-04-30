@@ -93,47 +93,46 @@ object ScenarioRunner {
                         || currentPeriod != previousPeriod
                         || currentSchemeVersion != previousSchemeVersion
 
-            data class Result(val previousAccrualBalance: Double, val currentAccrualBalance: Double, val accrualRunId: Int)
+            val (previousAccrualBalance, currentAccrualBalance, nextAccrualRunId) =
+                if (newAccrualRunNeeded) {
+                    val previousAccrualBalance = previousAccrualRun?.endAccrualBalance ?: 0.0
+                    val currentAccrualBalance = compound(
+                        aer = currentSchemeVersion.aer,
+                        start = currentDay,
+                        end = currentDay,
+                        startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualBalance
+                    ) - currentAccountBalance.balance.toDouble()
+                    val accrualRunId = Database.createNewAccrualRun(
+                        accountId = event.accountId,
+                        periodId = currentPeriod.id,
+                        schemeVersionId = currentSchemeVersion.id,
+                        eodBalanceId = currentAccountBalance.id,
+                        on = currentDay,
+                        startingBalance = previousAccrualBalance,
+                        closingBalance = currentAccrualBalance
+                    )
+                    Triple(previousAccrualBalance, currentAccrualBalance, accrualRunId)
+                } else {
+                    if (previousAccrualRun == null) throw Error("Expecting previous accrual run to exist for account ${event.accountId} on $currentDay")
+                    if (previousAccrualRun.end != previousDay) throw Error("Expected existing accrual run to end the day before the date currently being processed")
+                    val previousAccrualBalance = compound(
+                        aer = currentSchemeVersion.aer,
+                        start = previousAccrualRun.start,
+                        end = previousDay,
+                        startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
+                    ) - currentAccountBalance.balance.toDouble()
+                    val currentAccrualBalance = compound(
+                        aer = currentSchemeVersion.aer,
+                        start = previousAccrualRun.start,
+                        end = currentDay,
+                        startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
+                    ) - currentAccountBalance.balance.toDouble()
+                    Database.extendExistingAccrualRun(previousAccrualRun.id, currentDay, currentAccrualBalance)
+                    Triple(previousAccrualBalance, currentAccrualBalance, previousAccrualRun.id)
+                }
 
-            val result = if (newAccrualRunNeeded) {
-                val previousAccrualBalance = previousAccrualRun?.endAccrualBalance ?: 0.0
-                val currentAccrualBalance = compound(
-                    aer = currentSchemeVersion.aer,
-                    start = currentDay,
-                    end = currentDay,
-                    startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualBalance
-                ) - currentAccountBalance.balance.toDouble()
-                val accrualRunId = Database.createNewAccrualRun(
-                    accountId = event.accountId,
-                    periodId = currentPeriod.id,
-                    schemeVersionId = currentSchemeVersion.id,
-                    eodBalanceId = currentAccountBalance.id,
-                    on = currentDay,
-                    startingBalance = previousAccrualBalance,
-                    closingBalance = currentAccrualBalance
-                )
-                Result(previousAccrualBalance, currentAccrualBalance, accrualRunId)
-            } else {
-                if (previousAccrualRun == null) throw Error("Expecting previous accrual run to exist for account ${event.accountId} on $currentDay")
-                if (previousAccrualRun.end != previousDay) throw Error("Expected existing accrual run to end the day before the date currently being processed")
-                val previousAccrualBalance = compound(
-                    aer = currentSchemeVersion.aer,
-                    start = previousAccrualRun.start,
-                    end = previousDay,
-                    startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
-                ) - currentAccountBalance.balance.toDouble()
-                val currentAccrualBalance = compound(
-                    aer = currentSchemeVersion.aer,
-                    start = previousAccrualRun.start,
-                    end = currentDay,
-                    startingBalance = currentAccountBalance.balance.toDouble() + previousAccrualRun.startAccrualBalance
-                ) - currentAccountBalance.balance.toDouble()
-                Database.extendExistingAccrualRun(previousAccrualRun.id, currentDay, currentAccrualBalance)
-                Result(previousAccrualBalance, currentAccrualBalance, previousAccrualRun.id)
-            }
-
-            val accruedToday = result.currentAccrualBalance - result.previousAccrualBalance
-            Database.enqueueDailyAccrual(event.accountId, result.accrualRunId, currentDay, accruedToday.roundDown2dp())
+            val accruedToday = currentAccrualBalance - previousAccrualBalance
+            Database.enqueueDailyAccrual(event.accountId, nextAccrualRunId, currentDay, accruedToday.roundDown2dp())
 
             Database.completeEodBalanceCompletionEvent(event.accountId, currentDay)
         }
